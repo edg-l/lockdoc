@@ -255,6 +255,7 @@ fn queries_run_while_a_build_is_in_progress() {
         }
     }
     child.kill().unwrap();
+    child.wait().unwrap();
 
     let (_, deps_at, deps) = answers.iter().find(|a| a.0 == 2).unwrap();
     assert!(deps.contains("fixture-shapes"), "{deps}");
