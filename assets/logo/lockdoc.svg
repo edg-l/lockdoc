@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+<title>lockdoc</title>
+<mask id="under-bow"><rect width="64" height="64" fill="#fff"/><circle cx="44" cy="13" r="11.5" fill="#000"/></mask>
+<rect x="8" y="11" width="36" height="47" rx="4.5" fill="none" stroke="#1D2327" stroke-width="4.5" mask="url(#under-bow)"/>
+<path d="M16 23h13M16 31h11M16 39h13M16 47h8" stroke="#1D2327" stroke-width="3.5" stroke-linecap="round"/>
+<path fill="#C9562C" fill-rule="evenodd" d="M35 13a9 9 0 1 0 18 0a9 9 0 1 0-18 0ZM40.4 13a3.6 3.6 0 1 0 7.2 0a3.6 3.6 0 1 0-7.2 0Z"/>
+<path fill="#C9562C" d="M41 20h6v13h6.5v4.5H47v4h4.5V46H47v6l-3 4-3-4Z"/>
+</svg>
