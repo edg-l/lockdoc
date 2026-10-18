@@ -1,0 +1,22 @@
+[package]
+name = "lockdoc"
+version = "0.1.0"
+edition = "2024"
+description = "MCP server giving coding agents the API docs of a Rust project's dependencies, at the versions in its Cargo.lock"
+license = "Apache-2.0"
+repository = "https://github.com/edg-l/lockdoc"
+keywords = ["mcp", "rustdoc", "documentation", "agent", "cargo"]
+categories = ["development-tools", "command-line-utilities"]
+exclude = ["tests/fixture/target"]
+
+[dependencies]
+anyhow = "1.0.104"
+cargo_metadata = "0.23.1"
+clap = { version = "4.6.7", features = ["derive"] }
+dirs = "7.0.0"
+rmcp = { version = "3.5.1", features = ["server", "transport-io", "macros"] }
+rustdoc-types = "0.61"
+schemars = "1.2.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "io-std", "process", "sync"] }
