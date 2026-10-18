@@ -1,8 +1,8 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/logo/lockdoc-dark.svg">
-  <img src="assets/logo/lockdoc.svg" width="112" height="112" alt="lockdoc logo: a page of docs with a key laid across it as a bookmark">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/edg-l/lockdoc/master/assets/logo/lockdoc-dark.svg">
+  <img src="https://raw.githubusercontent.com/edg-l/lockdoc/master/assets/logo/lockdoc.svg" width="112" height="112" alt="lockdoc logo: a page of docs with a key laid across it as a bookmark">
 </picture>
 
 # lockdoc
