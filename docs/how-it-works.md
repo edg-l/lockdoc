@@ -95,6 +95,18 @@ shortest public path and location. Later searches scan that list and deserialize
 hits they return. The index is saved with the cache file of every crate it was built from,
 and is discarded when any of those crates resolves to a different file.
 
+## Concurrent queries
+
+The server answers calls concurrently, each on its own blocking thread. A query holds a lock
+only while it reads or updates shared state (the dependency graph, the open cache files, the
+search indexes), never across a cargo run. Building takes a separate lock, held for the whole
+cargo run.
+
+So while one call builds docs, a call whose docs are cached, a `deps` call, or a call for
+another project answers at once. A call that needs a build waits for the build lock, then
+checks again what is missing. When the call ahead of it built the same crate, nothing is built
+twice. Each call reports only what it built itself.
+
 ## Resolving a path
 
 `bevy::prelude::Transform` is resolved one segment at a time, the way `use` resolves it.

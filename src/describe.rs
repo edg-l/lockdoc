@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use rustdoc_types::{Attribute, Item, ItemEnum, MacroKind, StructKind, Type, VariantKind};
 
 use crate::render;
-use crate::store::{Ref, Store, Target};
+use crate::store::{Ref, Session, Target};
 
 const DOCS_CAP: usize = 4000;
 const MODULE_DOCS_CAP: usize = 1200;
@@ -324,7 +324,7 @@ fn attrs(item: &Item) -> Vec<String> {
 }
 
 /// The full page for an item: where it lives, its declaration, docs and members.
-pub fn page(store: &mut Store, r: &Ref, public_path: &str) -> String {
+pub fn page(store: &mut Session<'_>, r: &Ref, public_path: &str) -> String {
     let item = r.item();
     let mut out = String::new();
     let (pkg_name, version) = match store.ws() {
@@ -410,7 +410,7 @@ fn cap(s: &str, n: usize) -> String {
     format!("{}\n\n[docs cut at {n} bytes of {}]", &s[..end], s.len())
 }
 
-fn module_listing(store: &mut Store, r: &Ref, out: &mut String) {
+fn module_listing(store: &mut Session<'_>, r: &Ref, out: &mut String) {
     let children = store.children(r);
     let _ = writeln!(out, "\nItems ({}):", children.len());
     for (name, t) in children.iter().take(LIST_CAP) {
@@ -443,7 +443,7 @@ fn module_listing(store: &mut Store, r: &Ref, out: &mut String) {
     }
 }
 
-fn trait_listing(store: &mut Store, r: &Ref, out: &mut String) {
+fn trait_listing(store: &mut Session<'_>, r: &Ref, out: &mut String) {
     let members = store.members(r, false);
     let (required, provided): (Vec<_>, Vec<_>) = members.iter().partition(|(_, m)| {
         !matches!(&m.item().inner, ItemEnum::Function(f) if f.has_body)

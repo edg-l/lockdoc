@@ -2,6 +2,8 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -25,12 +27,16 @@ const RUSTDOCFLAGS: &str = "-Zunstable-options --output-format json --document-h
 ///
 /// Every cargo run uses a target directory owned by lockdoc, so the project's `target/` and its
 /// build lock are never touched, and `--frozen` so `Cargo.lock` is never rewritten.
+///
+/// Shared by concurrent queries. Only `build_lock` is held while cargo runs, so a query whose
+/// docs are already cached never waits behind a build.
 pub struct Builder {
     cache: PathBuf,
     /// Path dependencies have no version to key a cache entry on, so they are rebuilt once per
     /// process instead.
-    built_path_deps: HashSet<PathBuf>,
-    toolchain_checked: bool,
+    built_path_deps: Mutex<HashSet<PathBuf>>,
+    toolchain_checked: AtomicBool,
+    build_lock: Mutex<()>,
 }
 
 /// What a call had to build, reported back to the agent so a slow call is explained.
@@ -75,8 +81,9 @@ impl Builder {
             .join("lockdoc");
         Ok(Self {
             cache,
-            built_path_deps: HashSet::new(),
-            toolchain_checked: false,
+            built_path_deps: Mutex::default(),
+            toolchain_checked: AtomicBool::new(false),
+            build_lock: Mutex::new(()),
         })
     }
 
@@ -110,7 +117,7 @@ impl Builder {
     fn is_fresh(&self, ws: &Workspace, id: &PackageId) -> bool {
         let path = self.doc_path(ws, id);
         if ws.package(id).source.is_none() {
-            return self.built_path_deps.contains(&path);
+            return lock(&self.built_path_deps).contains(&path);
         }
         path.exists()
     }
@@ -118,19 +125,28 @@ impl Builder {
     /// Ensures JSON exists for every package in `ids`, building the missing ones in as few
     /// cargo runs as possible. Packages that fail are reported in the note, not as an error,
     /// so one crate that needs a system library does not hide its siblings.
-    pub fn ensure(&mut self, ws: &Workspace, ids: &[PackageId]) -> Result<BuildNote> {
-        let mut missing: Vec<PackageId> = Vec::new();
-        for id in ids {
-            if !self.is_fresh(ws, id) && !missing.contains(id) && ws.lib_name(id).is_some() {
-                missing.push(id.clone());
+    pub fn ensure(&self, ws: &Workspace, ids: &[PackageId]) -> Result<BuildNote> {
+        let missing = || -> Vec<PackageId> {
+            let mut out: Vec<PackageId> = Vec::new();
+            for id in ids {
+                if !self.is_fresh(ws, id) && !out.contains(id) && ws.lib_name(id).is_some() {
+                    out.push(id.clone());
+                }
             }
-        }
+            out
+        };
         let mut note = BuildNote::default();
-        if missing.is_empty() {
+        if missing().is_empty() {
             return Ok(note);
         }
         self.check_toolchain()?;
         let start = Instant::now();
+        let _building = lock(&self.build_lock);
+        // Another query may have built some of these while this one waited for the lock.
+        let missing = missing();
+        if missing.is_empty() {
+            return Ok(note);
+        }
         // Rustdoc writes `<lib name>.json`, so two versions of one crate need separate runs.
         let mut batches: Vec<Vec<PackageId>> = Vec::new();
         for id in missing {
@@ -198,7 +214,7 @@ impl Builder {
         Ok(())
     }
 
-    fn collect(&mut self, ws: &Workspace, batch: &[PackageId], note: &mut BuildNote) -> Result<()> {
+    fn collect(&self, ws: &Workspace, batch: &[PackageId], note: &mut BuildNote) -> Result<()> {
         let doc_dir = self.target_dir(ws).join("doc");
         for id in batch {
             let lib = ws.lib_name(id).expect("batched packages have a library");
@@ -206,15 +222,15 @@ impl Builder {
             std::fs::create_dir_all(dest.parent().expect("cache path has a parent"))?;
             convert(&doc_dir.join(format!("{lib}.json")), &dest)?;
             if ws.package(id).source.is_none() {
-                self.built_path_deps.insert(dest);
+                lock(&self.built_path_deps).insert(dest);
             }
             note.built.push(ws.spec(id));
         }
         Ok(())
     }
 
-    fn check_toolchain(&mut self) -> Result<()> {
-        if self.toolchain_checked {
+    fn check_toolchain(&self) -> Result<()> {
+        if self.toolchain_checked.load(Ordering::Relaxed) {
             return Ok(());
         }
         let ok = Command::new("rustup")
@@ -226,7 +242,7 @@ impl Builder {
                 "toolchain {TOOLCHAIN} is not installed; run `rustup toolchain install {TOOLCHAIN}`"
             );
         }
-        self.toolchain_checked = true;
+        self.toolchain_checked.store(true, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -259,6 +275,12 @@ fn convert(json: &Path, to: &Path) -> Result<()> {
 
 /// FNV-1a, for cache keys that must stay the same across Rust releases (`DefaultHasher` does not
 /// promise that).
+/// Locks `m`, carrying on past a poisoned lock: every value guarded in lockdoc is a cache that
+/// stays valid even if a query panicked while holding it.
+pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 pub fn fnv1a(s: &str) -> u64 {
     s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
         (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)

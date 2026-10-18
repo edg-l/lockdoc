@@ -5,11 +5,11 @@ use std::fmt::Write as _;
 use anyhow::{Result, anyhow};
 
 use crate::describe;
-use crate::store::Store;
+use crate::store::{Session, Store};
 
-/// Prepends what had to be built, so a slow answer explains itself.
-fn with_note(store: &mut Store, body: Result<String>) -> Result<String> {
-    let note = store.take_note();
+/// Prepends what this query had to build, so a slow answer explains itself.
+fn with_note(session: &mut Session<'_>, body: Result<String>) -> Result<String> {
+    let note = session.take_note();
     match (note, body) {
         (None, body) => body,
         (Some(n), Ok(body)) => Ok(format!("{n}\n\n{body}")),
@@ -17,8 +17,8 @@ fn with_note(store: &mut Store, body: Result<String>) -> Result<String> {
     }
 }
 
-pub fn deps(store: &mut Store) -> Result<String> {
-    let ws = store.ws()?;
+pub fn deps(store: &Store) -> Result<String> {
+    let ws = store.session().ws()?;
     let mut out = format!("Workspace {}\n", ws.root.display());
     for (name, id) in ws.member_deps() {
         let p = ws.package(&id);
@@ -43,21 +43,23 @@ pub fn deps(store: &mut Store) -> Result<String> {
     Ok(out)
 }
 
-pub fn item(store: &mut Store, path: &str) -> Result<String> {
+pub fn item(store: &Store, path: &str) -> Result<String> {
+    let mut session = store.session();
     let body = (|| {
-        let (refs, public) = store.resolve(path)?;
+        let (refs, public) = session.resolve(path)?;
         let pages: Vec<String> = refs
             .iter()
-            .map(|r| describe::page(store, r, &public))
+            .map(|r| describe::page(&mut session, r, &public))
             .collect();
         Ok(pages.join("\n---\n\n"))
     })();
-    with_note(store, body)
+    with_note(&mut session, body)
 }
 
-pub fn search(store: &mut Store, krate: &str, query: &str, limit: usize) -> Result<String> {
+pub fn search(store: &Store, krate: &str, query: &str, limit: usize) -> Result<String> {
+    let mut session = store.session();
     let body = (|| {
-        let hits = store.search(krate, query, limit)?;
+        let hits = session.search(krate, query, limit)?;
         if hits.is_empty() {
             return Ok(format!("No public item in `{krate}` matches `{query}`."));
         }
@@ -80,5 +82,5 @@ pub fn search(store: &mut Store, krate: &str, query: &str, limit: usize) -> Resu
         }
         Ok(out)
     })();
-    with_note(store, body)
+    with_note(&mut session, body)
 }

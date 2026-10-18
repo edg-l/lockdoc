@@ -166,3 +166,107 @@ fn unrendered_const_value_is_left_out() {
     assert!(out.contains("const MAX_RADIUS: f32"), "{out}");
     assert!(!out.contains("= _"), "{out}");
 }
+
+/// Drives `lockdoc serve` over stdio with three concurrent calls while `cargo doc` is slowed by
+/// a wrapper on PATH: a call that needs no build answers during the build, and a second call
+/// needing the same crate waits for it instead of building again.
+#[test]
+fn queries_run_while_a_build_is_in_progress() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let tmp = Path::new(env!("CARGO_TARGET_TMPDIR")).join("slow-cargo");
+    std::fs::create_dir_all(&tmp).unwrap();
+    // The rustup proxy on PATH, not `$CARGO`: only the proxy understands `+toolchain`.
+    let real_cargo = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v cargo"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let wrapper = tmp.join("cargo");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\ncase \" $* \" in *\" doc \"*) sleep 3;; esac\nexec \"{real_cargo}\" \"$@\"\n"
+        ),
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&wrapper).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&wrapper, perms).unwrap();
+    let path = format!("{}:{}", tmp.display(), std::env::var("PATH").unwrap());
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lockdoc"))
+        .arg("-C")
+        .arg(fixture())
+        .arg("serve")
+        .env("PATH", path)
+        .env("XDG_CACHE_HOME", tmp.join("cache"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut send = |v: serde_json::Value| writeln!(stdin, "{v}").unwrap();
+    let call = |id: u32, name: &str, args: serde_json::Value| {
+        serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": name, "arguments": args}})
+    };
+
+    send(
+        serde_json::json!({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                   "clientInfo": {"name": "test", "version": "0"}}}),
+    );
+    lines.next().unwrap().unwrap();
+    send(serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+
+    let start = Instant::now();
+    send(call(
+        1,
+        "item",
+        serde_json::json!({"path": "shapes::Circle"}),
+    ));
+    std::thread::sleep(Duration::from_millis(300));
+    send(call(2, "deps", serde_json::json!({})));
+    send(call(
+        3,
+        "item",
+        serde_json::json!({"path": "shapes::geometry::Kind"}),
+    ));
+
+    let mut answers = Vec::new();
+    while answers.len() < 3 {
+        let msg: serde_json::Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+        if let Some(id) = msg["id"].as_u64() {
+            let text = msg["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            answers.push((id, start.elapsed(), text));
+        }
+    }
+    child.kill().unwrap();
+
+    let (_, deps_at, deps) = answers.iter().find(|a| a.0 == 2).unwrap();
+    assert!(deps.contains("fixture-shapes"), "{deps}");
+    assert!(
+        *deps_at < Duration::from_secs(2),
+        "deps waited for the build: answered after {deps_at:?}"
+    );
+    let built = answers
+        .iter()
+        .filter(|a| a.2.contains("lockdoc built docs for fixture-shapes"))
+        .count();
+    assert_eq!(built, 1, "expected exactly one build: {answers:#?}");
+    let (_, _, kind) = answers.iter().find(|a| a.0 == 3).unwrap();
+    assert!(kind.contains("enum shapes::geometry::Kind"), "{kind}");
+}

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -8,6 +9,7 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use crate::docbuild::lock;
 use crate::ops;
 use crate::store::Store;
 
@@ -21,7 +23,9 @@ Cargo.lock, and running cargo in the project meanwhile is fine.";
 #[derive(Clone)]
 pub struct Server {
     default_dir: PathBuf,
-    stores: Arc<Mutex<HashMap<PathBuf, Store>>>,
+    /// One store per project directory. The map's lock is held only to look a store up; each
+    /// store synchronizes its own state, so queries run concurrently.
+    stores: Arc<Mutex<HashMap<PathBuf, Arc<Store>>>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -67,22 +71,21 @@ impl Server {
     async fn with_store(
         &self,
         project: Option<String>,
-        f: impl FnOnce(&mut Store) -> anyhow::Result<String> + Send + 'static,
+        f: impl FnOnce(&Store) -> anyhow::Result<String> + Send + 'static,
     ) -> Result<String, String> {
         let dir = project.map_or_else(|| self.default_dir.clone(), PathBuf::from);
-        let stores = self.stores.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut stores = stores.lock().unwrap_or_else(|p| p.into_inner());
-            let store = match stores.entry(dir.clone()) {
-                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(Store::new(dir).map_err(|e| format!("{e:#}"))?)
-                }
-            };
-            f(store).map_err(|e| format!("{e:#}"))
-        })
-        .await
-        .map_err(|e| format!("lockdoc task failed: {e}"))?
+        let store = {
+            let mut stores = lock(&self.stores);
+            match stores.entry(dir.clone()) {
+                Entry::Occupied(e) => e.get().clone(),
+                Entry::Vacant(e) => e
+                    .insert(Arc::new(Store::new(dir).map_err(|e| format!("{e:#}"))?))
+                    .clone(),
+            }
+        };
+        tokio::task::spawn_blocking(move || f(&store).map_err(|e| format!("{e:#}")))
+            .await
+            .map_err(|e| format!("lockdoc task failed: {e}"))?
     }
 }
 

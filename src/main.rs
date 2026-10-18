@@ -56,13 +56,13 @@ async fn main() -> Result<()> {
             service.waiting().await?;
             return Ok(());
         }
-        Cmd::Deps => ops::deps(&mut Store::new(project)?)?,
-        Cmd::Item { path } => ops::item(&mut Store::new(project)?, &path)?,
+        Cmd::Deps => ops::deps(&Store::new(project)?)?,
+        Cmd::Item { path } => ops::item(&Store::new(project)?, &path)?,
         Cmd::Search {
             krate,
             query,
             limit,
-        } => ops::search(&mut Store::new(project)?, &krate, &query, limit)?,
+        } => ops::search(&Store::new(project)?, &krate, &query, limit)?,
     };
     print!("{text}");
     Ok(())

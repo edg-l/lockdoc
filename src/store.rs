@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow, bail};
 use cargo_metadata::PackageId;
@@ -8,7 +8,7 @@ use rustdoc_types::{Attribute, Id, Item, ItemEnum, StructKind, VariantKind};
 use serde::{Deserialize, Serialize};
 
 use crate::cachefile::CacheFile;
-use crate::docbuild::{BuildNote, Builder, fnv1a};
+use crate::docbuild::{BuildNote, Builder, fnv1a, lock};
 use crate::workspace::Workspace;
 
 /// The docs of one package.
@@ -73,36 +73,59 @@ struct IndexEntry {
     member: bool,
 }
 
+/// Everything known about one project, shared by every query against it. Each field has its
+/// own short-lived lock, and building docs takes the builder's separate lock, so concurrent
+/// queries only wait on each other when one needs a build another is running.
 pub struct Store {
     dir: PathBuf,
-    ws: Option<Workspace>,
     builder: Builder,
-    docs: HashMap<PackageId, Arc<Doc>>,
-    indexes: HashMap<String, Arc<SearchIndex>>,
-    note: BuildNote,
+    ws: Mutex<Option<Arc<Workspace>>>,
+    docs: Mutex<HashMap<PackageId, Arc<Doc>>>,
+    indexes: Mutex<HashMap<String, Arc<SearchIndex>>>,
 }
 
 impl Store {
     pub fn new(dir: PathBuf) -> Result<Self> {
         Ok(Self {
             dir,
-            ws: None,
             builder: Builder::new()?,
-            docs: HashMap::new(),
-            indexes: HashMap::new(),
-            note: BuildNote::default(),
+            ws: Mutex::default(),
+            docs: Mutex::default(),
+            indexes: Mutex::default(),
         })
     }
 
+    /// Starts one query. Its build note collects what this query alone had to build.
+    pub fn session(&self) -> Session<'_> {
+        Session {
+            store: self,
+            note: BuildNote::default(),
+        }
+    }
+}
+
+/// One query against a `Store`.
+pub struct Session<'a> {
+    store: &'a Store,
+    note: BuildNote,
+}
+
+impl Session<'_> {
     /// The workspace graph, reloaded when the lockfile or a manifest changes so versions and
     /// features stay those on disk.
-    pub fn ws(&mut self) -> Result<&Workspace> {
-        if !self.ws.as_ref().is_some_and(Workspace::is_current) {
-            self.ws = Some(Workspace::load(&self.dir, self.builder.cache_dir())?);
-            self.docs.clear();
-            self.indexes.clear();
+    pub fn ws(&self) -> Result<Arc<Workspace>> {
+        let mut ws = lock(&self.store.ws);
+        if let Some(current) = ws.as_ref().filter(|w| w.is_current()) {
+            return Ok(current.clone());
         }
-        Ok(self.ws.as_ref().expect("loaded above"))
+        let fresh = Arc::new(Workspace::load(
+            &self.store.dir,
+            self.store.builder.cache_dir(),
+        )?);
+        *ws = Some(fresh.clone());
+        lock(&self.store.docs).clear();
+        lock(&self.store.indexes).clear();
+        Ok(fresh)
     }
 
     pub fn take_note(&mut self) -> Option<String> {
@@ -110,20 +133,19 @@ impl Store {
     }
 
     fn ensure(&mut self, ids: &[PackageId]) -> Result<()> {
-        self.ws()?;
-        let ws = &self.ws.as_ref().expect("loaded by ws()");
-        let note = self.builder.ensure(ws, ids)?;
+        let ws = self.ws()?;
+        let note = self.store.builder.ensure(&ws, ids)?;
         self.note.merge(note);
         Ok(())
     }
 
     pub fn load(&mut self, id: &PackageId) -> Result<Arc<Doc>> {
-        if let Some(doc) = self.docs.get(id) {
+        if let Some(doc) = lock(&self.store.docs).get(id) {
             return Ok(doc.clone());
         }
         self.ensure(std::slice::from_ref(id))?;
-        let ws = &self.ws.as_ref().expect("loaded by ensure()");
-        let path = self.builder.doc_path(ws, id);
+        let ws = self.ws()?;
+        let path = self.store.builder.doc_path(&ws, id);
         if !path.exists() {
             bail!("no docs for {}", ws.spec(id));
         }
@@ -131,7 +153,7 @@ impl Store {
             pkg: id.clone(),
             file: CacheFile::open(&path)?,
         });
-        self.docs.insert(id.clone(), doc.clone());
+        lock(&self.store.docs).insert(id.clone(), doc.clone());
         Ok(doc)
     }
 
@@ -470,12 +492,11 @@ impl Store {
 
     /// Every public item under `root_path`, from memory, from disk, or by walking the docs.
     fn search_index(&mut self, roots: Vec<Ref>, root_path: &str) -> Result<Arc<SearchIndex>> {
-        if let Some(index) = self.indexes.get(root_path) {
+        if let Some(index) = lock(&self.store.indexes).get(root_path) {
             return Ok(index.clone());
         }
-        self.ws()?;
-        let ws = &self.ws.as_ref().expect("loaded by ws()");
-        let saved_at = self.builder.cache_dir().join("search").join(format!(
+        let ws = self.ws()?;
+        let saved_at = self.store.builder.cache_dir().join("search").join(format!(
             "{:016x}.json",
             fnv1a(&format!("{}\n{root_path}", ws.root.display()))
         ));
@@ -485,10 +506,9 @@ impl Store {
             .filter(|index| {
                 // Valid while every crate it was built from still resolves to the same cache
                 // file; a lockfile or feature change moves at least one of them.
-                index
-                    .docs
-                    .iter()
-                    .all(|(pkg, path)| ws.has(pkg) && self.builder.doc_path(ws, pkg) == *path)
+                index.docs.iter().all(|(pkg, path)| {
+                    ws.has(pkg) && self.store.builder.doc_path(&ws, pkg) == *path
+                })
             });
         let index = Arc::new(match saved {
             Some(index) => index,
@@ -505,7 +525,7 @@ impl Store {
                 index
             }
         });
-        self.indexes.insert(root_path.to_string(), index.clone());
+        lock(&self.store.indexes).insert(root_path.to_string(), index.clone());
         Ok(index)
     }
 
@@ -522,10 +542,10 @@ impl Store {
         while let Some((module, prefix)) = queue.pop_front() {
             if !docs.contains_key(&module.doc.pkg) {
                 self.prefetch(&module.doc)?;
-                let ws = &self.ws.as_ref().expect("loaded by prefetch()");
+                let ws = self.ws()?;
                 docs.insert(
                     module.doc.pkg.clone(),
-                    self.builder.doc_path(ws, &module.doc.pkg),
+                    self.store.builder.doc_path(&ws, &module.doc.pkg),
                 );
             }
             for (name, target) in self.children(&module) {
@@ -536,9 +556,11 @@ impl Store {
                     continue;
                 }
                 if !docs.contains_key(&r.doc.pkg) {
-                    self.ws()?;
-                    let ws = &self.ws.as_ref().expect("loaded by ws()");
-                    docs.insert(r.doc.pkg.clone(), self.builder.doc_path(ws, &r.doc.pkg));
+                    let ws = self.ws()?;
+                    docs.insert(
+                        r.doc.pkg.clone(),
+                        self.store.builder.doc_path(&ws, &r.doc.pkg),
+                    );
                 }
                 let path = format!("{prefix}::{name}");
                 if matches!(
