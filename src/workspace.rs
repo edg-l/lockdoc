@@ -1,8 +1,81 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result, bail};
 use cargo_metadata::{Metadata, MetadataCommand, Package, PackageId, TargetKind};
+use serde::{Deserialize, Serialize};
+
+use crate::docbuild::fnv1a;
+
+/// `cargo metadata` output saved on disk with the modification times of every file it was
+/// derived from, so a new session skips the ~0.3s cargo run while nothing changed.
+#[derive(Serialize, Deserialize)]
+struct SavedMetadata {
+    stamps: Vec<(PathBuf, u128)>,
+    meta: Metadata,
+}
+
+fn mtime_ns(path: &Path) -> u128 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos())
+}
+
+/// The files `cargo metadata` reads that a user edits: the lockfile, the root manifest and
+/// the manifest of every path package. Registry and git packages are fixed by the lockfile.
+fn stamps(meta: &Metadata) -> Vec<(PathBuf, u128)> {
+    let root = meta.workspace_root.as_std_path();
+    let mut files = vec![root.join("Cargo.lock"), root.join("Cargo.toml")];
+    files.extend(
+        meta.packages
+            .iter()
+            .filter(|p| p.source.is_none())
+            .map(|p| p.manifest_path.clone().into_std_path_buf()),
+    );
+    files
+        .into_iter()
+        .map(|f| {
+            let t = mtime_ns(&f);
+            (f, t)
+        })
+        .collect()
+}
+
+fn metadata(dir: &Path, cache: &Path) -> Result<SavedMetadata> {
+    let saved_at = cache
+        .join("metadata")
+        .join(format!("{:016x}.json", fnv1a(&dir.to_string_lossy())));
+    if let Ok(bytes) = std::fs::read(&saved_at)
+        && let Ok(saved) = serde_json::from_slice::<SavedMetadata>(&bytes)
+        && saved.stamps.iter().all(|(f, t)| mtime_ns(f) == *t)
+    {
+        return Ok(saved);
+    }
+    // `--frozen` keeps cargo from rewriting Cargo.lock or touching the network; a lockfile
+    // that is out of date becomes an error the caller sees instead of a silent update.
+    let meta = MetadataCommand::new()
+        .current_dir(dir)
+        .other_options(vec!["--frozen".to_string()])
+        .exec()
+        .with_context(|| format!("cargo metadata failed in {}", dir.display()))?;
+    let saved = SavedMetadata {
+        stamps: stamps(&meta),
+        meta,
+    };
+    // Saving is an optimization; a read-only cache directory only costs the next session time.
+    if std::fs::create_dir_all(saved_at.parent().expect("has a parent")).is_ok()
+        && let Ok(bytes) = serde_json::to_vec(&saved)
+    {
+        let tmp = saved_at.with_extension(format!("{}.tmp", std::process::id()));
+        if std::fs::write(&tmp, bytes).is_ok() {
+            let _ = std::fs::rename(&tmp, &saved_at);
+        }
+    }
+    Ok(saved)
+}
 
 /// The resolved dependency graph of one cargo workspace, read from `cargo metadata`.
 pub struct Workspace {
@@ -12,17 +85,12 @@ pub struct Workspace {
     /// Edges of the resolve graph: package → (name the dependent uses in code, dependency).
     deps: HashMap<PackageId, Vec<(String, PackageId)>>,
     features: HashMap<PackageId, Vec<String>>,
+    stamps: Vec<(PathBuf, u128)>,
 }
 
 impl Workspace {
-    pub fn load(dir: &Path) -> Result<Self> {
-        // `--frozen` keeps cargo from rewriting Cargo.lock or touching the network; a lockfile
-        // that is out of date becomes an error the caller sees instead of a silent update.
-        let meta = MetadataCommand::new()
-            .current_dir(dir)
-            .other_options(vec!["--frozen".to_string()])
-            .exec()
-            .with_context(|| format!("cargo metadata failed in {}", dir.display()))?;
+    pub fn load(dir: &Path, cache: &Path) -> Result<Self> {
+        let SavedMetadata { stamps, meta } = metadata(dir, cache)?;
         let Some(resolve) = &meta.resolve else {
             bail!("cargo metadata returned no resolve graph");
         };
@@ -52,11 +120,21 @@ impl Workspace {
             packages,
             deps,
             features,
+            stamps,
         })
+    }
+
+    /// Whether the lockfile and manifests are unchanged since this graph was read.
+    pub fn is_current(&self) -> bool {
+        self.stamps.iter().all(|(f, t)| mtime_ns(f) == *t)
     }
 
     pub fn package(&self, id: &PackageId) -> &Package {
         &self.meta.packages[self.packages[id]]
+    }
+
+    pub fn has(&self, id: &PackageId) -> bool {
+        self.packages.contains_key(id)
     }
 
     pub fn features(&self, id: &PackageId) -> &[String] {

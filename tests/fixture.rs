@@ -111,3 +111,43 @@ fn project_files_are_left_alone() {
         "lockdoc created the project's target/"
     );
 }
+
+#[test]
+fn manifest_edit_invalidates_saved_metadata() {
+    let copy = Path::new(env!("CARGO_TARGET_TMPDIR")).join("fixture-copy");
+    let _ = std::fs::remove_dir_all(&copy);
+    for rel in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "app/src/lib.rs",
+        "dep/Cargo.toml",
+        "dep/src/lib.rs",
+    ] {
+        let to = copy.join(rel);
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(fixture().join(rel), to).unwrap();
+    }
+    let manifest = copy.join("app/Cargo.toml");
+    let with_extra = std::fs::read_to_string(fixture().join("app/Cargo.toml")).unwrap();
+    std::fs::write(&manifest, &with_extra).unwrap();
+    let run = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_lockdoc"))
+            .arg("-C")
+            .arg(&copy)
+            .args(args)
+            .env(
+                "XDG_CACHE_HOME",
+                Path::new(env!("CARGO_TARGET_TMPDIR")).join("lockdoc-cache"),
+            )
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    assert!(run(&["deps"]).contains("[extra]"));
+    std::fs::write(
+        &manifest,
+        with_extra.replace(", features = [\"extra\"]", ""),
+    )
+    .unwrap();
+    assert!(!run(&["deps"]).contains("[extra]"));
+}

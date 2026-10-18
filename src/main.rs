@@ -1,3 +1,4 @@
+mod cachefile;
 mod describe;
 mod docbuild;
 mod ops;

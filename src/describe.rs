@@ -166,9 +166,9 @@ fn variant(name: &str, kind: &VariantKind) -> String {
 /// Full declaration with fields or variants spelled out.
 fn declaration(r: &Ref) -> String {
     let item = r.item();
-    let k = &r.doc.krate;
+    let k = &r.doc.file;
     let field = |id: &rustdoc_types::Id| -> Option<String> {
-        let f = k.index.get(id)?;
+        let f = k.item(*id)?;
         match &f.inner {
             ItemEnum::StructField(t) => {
                 Some(format!("pub {}: {}", f.name.as_deref()?, render::ty(t)))
@@ -178,7 +178,7 @@ fn declaration(r: &Ref) -> String {
     };
     let tuple_field = |f: &Option<rustdoc_types::Id>| -> String {
         f.as_ref()
-            .and_then(|id| k.index.get(id))
+            .and_then(|id| k.item(*id))
             .and_then(|f| match &f.inner {
                 ItemEnum::StructField(t) => Some(format!("pub {}", render::ty(t))),
                 _ => None,
@@ -230,7 +230,7 @@ fn declaration(r: &Ref) -> String {
             let mut body: Vec<String> = e
                 .variants
                 .iter()
-                .filter_map(|id| k.index.get(id))
+                .filter_map(|id| k.item(*id))
                 .map(|v| {
                     let vname = v.name.as_deref().unwrap_or("_");
                     let ItemEnum::Variant(var) = &v.inner else {
@@ -322,7 +322,7 @@ pub fn page(store: &mut Store, r: &Ref, public_path: &str) -> String {
         Err(_) => (String::new(), String::new()),
     };
     let _ = writeln!(out, "{} {public_path}  ({pkg_name} {version})", kind(item));
-    if let Some(defined) = r.doc.krate.paths.get(&r.id).map(|s| s.path.join("::"))
+    if let Some(defined) = r.doc.file.summary(r.id).map(|s| s.path.join("::"))
         && defined != public_path
     {
         let _ = writeln!(out, "defined at {defined}");
@@ -463,7 +463,7 @@ fn line(item: &Item, out: &mut String) {
 }
 
 fn impl_listing(r: &Ref, out: &mut String) {
-    let k = &r.doc.krate;
+    let k = &r.doc.file;
     let impls = match &r.item().inner {
         ItemEnum::Struct(s) => &s.impls,
         ItemEnum::Enum(e) => &e.impls,
@@ -474,7 +474,8 @@ fn impl_listing(r: &Ref, out: &mut String) {
     let mut inherent = Vec::new();
     let mut traits = Vec::new();
     let mut auto = Vec::new();
-    for imp in impls.iter().filter_map(|id| k.index.get(id)) {
+    let impl_items: Vec<Item> = impls.iter().filter_map(|id| k.item(*id)).collect();
+    for imp in &impl_items {
         let ItemEnum::Impl(im) = &imp.inner else {
             continue;
         };
@@ -489,10 +490,10 @@ fn impl_listing(r: &Ref, out: &mut String) {
             )),
         }
     }
-    let methods: Vec<&Item> = inherent
+    let methods: Vec<Item> = inherent
         .iter()
         .flat_map(|im| im.items.iter())
-        .filter_map(|id| k.index.get(id))
+        .filter_map(|id| k.item(*id))
         .collect();
     if !methods.is_empty() {
         let _ = writeln!(out, "\nInherent items ({}):", methods.len());
@@ -517,10 +518,10 @@ fn impl_listing(r: &Ref, out: &mut String) {
 }
 
 fn implementors(r: &Ref, ids: &[rustdoc_types::Id], out: &mut String) {
-    let k = &r.doc.krate;
+    let k = &r.doc.file;
     let fors: Vec<String> = ids
         .iter()
-        .filter_map(|id| k.index.get(id))
+        .filter_map(|id| k.item(*id))
         .filter_map(|i| match &i.inner {
             ItemEnum::Impl(im) if !im.is_synthetic => Some(match &im.blanket_impl {
                 Some(Type::Generic(g)) => {
@@ -537,10 +538,7 @@ fn implementors(r: &Ref, ids: &[rustdoc_types::Id], out: &mut String) {
     let _ = writeln!(
         out,
         "\nImplemented in {} for ({}, downstream crates not shown):",
-        r.doc
-            .krate
-            .paths
-            .get(&r.id)
+        k.summary(r.id)
             .and_then(|s| s.path.first().cloned())
             .unwrap_or_default(),
         fors.len()

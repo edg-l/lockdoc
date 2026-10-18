@@ -50,23 +50,50 @@ followed, because what it points to is public.
 
 ```text
 ~/.cache/lockdoc/
-├── json/<package>-<version>-<key>.json   one file per built crate
+├── docs/<package>-<version>-<key>.ldoc   one file per built crate
+├── metadata/<dir hash>.json              cargo metadata output, per project directory
+├── search/<hash>.json                    flattened public API, per search root
 └── target/<workspace hash>/              cargo's target dir for that workspace
 ```
 
+Everything a session computes is kept here, so a new session starts warm.
+
+### Doc files
+
+rustdoc's JSON for a large crate is tens of megabytes, and bevy's prelude reaches about 60
+crates. Parsing all of them took 1.3 seconds and held about 1 GB, for a lookup that reads a
+few dozen items. So each crate's JSON is parsed once, when it is built, and stored as a
+`.ldoc` file: one JSON blob per item, behind four sorted tables (id to item, id to path
+summary, defining path to id, name to ids). lockdoc memory-maps the file and binary-searches
+the tables in place. Opening a crate parses nothing, and only the items a query touches are
+deserialized. `cachefile.rs` documents the layout.
+
 `<key>` hashes everything that changes the output: the package source (registry, or git
-commit), the enabled features, the toolchain and the rustdoc flags. A different feature set
-in another project gets its own file. The hash is FNV-1a, which gives the same key across
-Rust releases; std's `DefaultHasher` does not promise that.
+commit), the enabled features, the toolchain, the rustdoc flags and the `.ldoc` format
+version. A different feature set in another project gets its own file. The hash is FNV-1a,
+which gives the same key across Rust releases; std's `DefaultHasher` does not promise that.
 
 Path dependencies have no version or commit to key on. They are rebuilt the first time each
 server process needs them.
 
-Results are written to a temporary file named after the process id, then renamed into
-place, so two lockdoc processes working on one project never read a half-written file.
+Files are written under a temporary name containing the process id, then renamed into place.
+Two lockdoc processes working on one project never share a temporary file, and a reader maps
+either the old file or the new one, never a partial write.
 
-When `Cargo.lock` changes on disk, the server reloads `cargo metadata` and drops the docs it
-holds in memory, so the next lookup uses the new versions.
+### Metadata
+
+`cargo metadata` takes about 0.3 seconds, and every lookup needs the dependency graph it
+returns. Its output is saved with the modification times of the files it was derived from:
+`Cargo.lock`, the root `Cargo.toml` and the manifest of every path package. The saved copy is
+used while all of those are unchanged. A running server checks the same times before each
+call and, on a change, reloads the graph and drops what it holds in memory.
+
+### Search index
+
+The first search under a root walks the whole public API once and records each item's name,
+shortest public path and location. Later searches scan that list and deserialize only the
+hits they return. The index is saved with the cache file of every crate it was built from,
+and is discarded when any of those crates resolves to a different file.
 
 ## Resolving a path
 

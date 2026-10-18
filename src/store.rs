@@ -1,34 +1,41 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use cargo_metadata::PackageId;
-use rustdoc_types::{
-    Attribute, Crate, FORMAT_VERSION, Id, Item, ItemEnum, StructKind, VariantKind,
-};
+use rustdoc_types::{Attribute, Id, Item, ItemEnum, StructKind, VariantKind};
+use serde::{Deserialize, Serialize};
 
-use crate::docbuild::{BuildNote, Builder};
+use crate::cachefile::CacheFile;
+use crate::docbuild::{BuildNote, Builder, fnv1a};
 use crate::workspace::Workspace;
 
-/// The rustdoc JSON of one package, with a reverse index from defining path to item.
+/// The docs of one package.
 pub struct Doc {
     pub pkg: PackageId,
-    pub krate: Crate,
-    by_path: HashMap<Vec<String>, Id>,
+    pub file: CacheFile,
 }
 
-/// An item inside a specific package's docs.
+/// An item inside a specific package's docs, deserialized.
 #[derive(Clone)]
 pub struct Ref {
     pub doc: Arc<Doc>,
     pub id: Id,
+    item: Arc<Item>,
 }
 
 impl Ref {
+    pub fn new(doc: &Arc<Doc>, id: Id) -> Option<Self> {
+        Some(Self {
+            item: Arc::new(doc.file.item(id)?),
+            doc: doc.clone(),
+            id,
+        })
+    }
+
     pub fn item(&self) -> &Item {
-        &self.doc.krate.index[&self.id]
+        &self.item
     }
 
     fn key(&self) -> (PackageId, Id) {
@@ -48,11 +55,30 @@ pub struct Hit {
     pub target: Ref,
 }
 
+/// The flattened public API under one path, for search. Saved on disk with the cache files it
+/// was built from.
+#[derive(Serialize, Deserialize)]
+struct SearchIndex {
+    docs: Vec<(PackageId, PathBuf)>,
+    entries: Vec<IndexEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct IndexEntry {
+    name: String,
+    path: String,
+    pkg: PackageId,
+    id: u32,
+    /// An associated item rather than a module-level one; ranks one step lower.
+    member: bool,
+}
+
 pub struct Store {
     dir: PathBuf,
-    ws: Option<(Workspace, SystemTime)>,
+    ws: Option<Workspace>,
     builder: Builder,
     docs: HashMap<PackageId, Arc<Doc>>,
+    indexes: HashMap<String, Arc<SearchIndex>>,
     note: BuildNote,
 }
 
@@ -63,25 +89,20 @@ impl Store {
             ws: None,
             builder: Builder::new()?,
             docs: HashMap::new(),
+            indexes: HashMap::new(),
             note: BuildNote::default(),
         })
     }
 
-    /// The workspace graph, reloaded when `Cargo.lock` changes so versions and features stay
-    /// those of the lockfile on disk.
+    /// The workspace graph, reloaded when the lockfile or a manifest changes so versions and
+    /// features stay those on disk.
     pub fn ws(&mut self) -> Result<&Workspace> {
-        let stamp = self.ws.as_ref().and_then(|(ws, _)| lock_mtime(&ws.root));
-        let stale = match (&self.ws, stamp) {
-            (Some((_, loaded)), Some(now)) => *loaded != now,
-            _ => true,
-        };
-        if stale {
-            let ws = Workspace::load(&self.dir)?;
-            let mtime = lock_mtime(&ws.root).unwrap_or(SystemTime::UNIX_EPOCH);
-            self.ws = Some((ws, mtime));
+        if !self.ws.as_ref().is_some_and(Workspace::is_current) {
+            self.ws = Some(Workspace::load(&self.dir, self.builder.cache_dir())?);
             self.docs.clear();
+            self.indexes.clear();
         }
-        Ok(&self.ws.as_ref().expect("loaded above").0)
+        Ok(self.ws.as_ref().expect("loaded above"))
     }
 
     pub fn take_note(&mut self) -> Option<String> {
@@ -90,7 +111,7 @@ impl Store {
 
     fn ensure(&mut self, ids: &[PackageId]) -> Result<()> {
         self.ws()?;
-        let ws = &self.ws.as_ref().expect("loaded by ws()").0;
+        let ws = &self.ws.as_ref().expect("loaded by ws()");
         let note = self.builder.ensure(ws, ids)?;
         self.note.merge(note);
         Ok(())
@@ -101,28 +122,14 @@ impl Store {
             return Ok(doc.clone());
         }
         self.ensure(std::slice::from_ref(id))?;
-        let ws = &self.ws.as_ref().expect("loaded by ensure()").0;
-        let path = self.builder.json_path(ws, id);
+        let ws = &self.ws.as_ref().expect("loaded by ensure()");
+        let path = self.builder.doc_path(ws, id);
         if !path.exists() {
             bail!("no docs for {}", ws.spec(id));
         }
-        let bytes = std::fs::read(&path)?;
-        let krate: Crate = serde_json::from_slice(&bytes).with_context(|| {
-            format!(
-                "{} is not rustdoc JSON format {FORMAT_VERSION}; delete it to rebuild",
-                path.display()
-            )
-        })?;
-        let by_path = krate
-            .paths
-            .iter()
-            .filter(|(_, s)| s.crate_id == 0)
-            .map(|(id, s)| (s.path.clone(), *id))
-            .collect();
         let doc = Arc::new(Doc {
             pkg: id.clone(),
-            krate,
-            by_path,
+            file: CacheFile::open(&path)?,
         });
         self.docs.insert(id.clone(), doc.clone());
         Ok(doc)
@@ -130,55 +137,47 @@ impl Store {
 
     /// Follows `id` as referenced from `doc` to the docs that define it.
     pub fn target(&mut self, doc: &Arc<Doc>, id: Id) -> Target {
-        if let Some(item) = doc.krate.index.get(&id)
-            && item.crate_id == 0
+        if let Some(r) = Ref::new(doc, id)
+            && r.item().crate_id == 0
         {
-            return Target::Found(Ref {
-                doc: doc.clone(),
-                id,
-            });
+            return Target::Found(r);
         }
-        let Some(summary) = doc.krate.paths.get(&id) else {
+        let Some(summary) = doc.file.summary(id) else {
             return Target::Named("<unknown>".into());
         };
         let full = summary.path.join("::");
-        let Some(ext) = doc.krate.external_crates.get(&summary.crate_id) else {
+        let Some(ext) = doc.file.external_crate(summary.crate_id) else {
             return Target::Named(full);
         };
         let Ok(ws) = self.ws() else {
             return Target::Named(full);
         };
-        let Some(pkg) = ws.find_from(&doc.pkg, &ext.name) else {
+        let Some(pkg) = ws.find_from(&doc.pkg, &ext.name.clone()) else {
             return Target::Named(full);
         };
         let Ok(ext_doc) = self.load(&pkg) else {
             return Target::Named(full);
         };
         let found = ext_doc
-            .by_path
-            .get(&summary.path)
-            .copied()
-            .filter(|id| ext_doc.krate.index.contains_key(id))
+            .file
+            .id_by_path(&summary.path)
+            .and_then(|id| Ref::new(&ext_doc, id))
             .or_else(|| {
                 // A crate's own `paths` table does not always agree with its `index`: proc macros
                 // get one id in each. Fall back to the unique indexed item with the same name
                 // and kind.
                 let name = summary.path.last()?;
                 let mut matches = ext_doc
-                    .krate
-                    .index
-                    .values()
-                    .filter(|i| {
-                        i.crate_id == 0
-                            && i.name.as_ref() == Some(name)
-                            && i.inner.item_kind() == summary.kind
-                    })
-                    .map(|i| i.id);
+                    .file
+                    .ids_named(name)
+                    .into_iter()
+                    .filter_map(|id| Ref::new(&ext_doc, id))
+                    .filter(|r| r.item().inner.item_kind() == summary.kind);
                 let first = matches.next()?;
                 matches.next().is_none().then_some(first)
             });
         match found {
-            Some(id) => Target::Found(Ref { doc: ext_doc, id }),
+            Some(r) => Target::Found(r),
             None => Target::Named(full),
         }
     }
@@ -207,9 +206,10 @@ impl Store {
             _ => return,
         };
         for id in ids {
-            let Some(item) = r.doc.krate.index.get(&id) else {
+            let Some(child) = Ref::new(&r.doc, id) else {
                 continue;
             };
+            let item = child.item();
             match &item.inner {
                 ItemEnum::Use(u) => {
                     let Some(target_id) = u.id else {
@@ -227,14 +227,8 @@ impl Store {
                 ItemEnum::Impl(_) => {}
                 _ if is_hidden(item) => {}
                 _ => {
-                    if let Some(name) = &item.name {
-                        out.push((
-                            name.clone(),
-                            Target::Found(Ref {
-                                doc: r.doc.clone(),
-                                id,
-                            }),
-                        ));
+                    if let Some(name) = item.name.clone() {
+                        out.push((name, Target::Found(child)));
                     }
                 }
             }
@@ -244,14 +238,13 @@ impl Store {
     /// Fields, variants and associated items of a type, or the items of a trait. Items from a
     /// type's trait impls are included only with `trait_impls`; their docs live on the trait.
     pub fn members(&self, r: &Ref, trait_impls: bool) -> Vec<(String, Ref)> {
-        let k = &r.doc.krate;
-        let at = |id: &Id| Ref {
-            doc: r.doc.clone(),
-            id: *id,
-        };
+        let at = |id: &Id| Ref::new(&r.doc, *id);
         let named = |ids: &[Id]| -> Vec<(String, Ref)> {
             ids.iter()
-                .filter_map(|id| Some((k.index.get(id)?.name.clone()?, at(id))))
+                .filter_map(|id| {
+                    let m = at(id)?;
+                    Some((m.item().name.clone()?, m))
+                })
                 .collect()
         };
         let mut out = Vec::new();
@@ -263,7 +256,7 @@ impl Store {
                         fields
                             .iter()
                             .enumerate()
-                            .filter_map(|(i, f)| Some((i.to_string(), at(f.as_ref()?)))),
+                            .filter_map(|(i, f)| Some((i.to_string(), at(f.as_ref()?)?))),
                     ),
                     StructKind::Unit => {}
                 }
@@ -287,14 +280,14 @@ impl Store {
             }
             _ => return out,
         };
-        let (inherent, traits): (Vec<&Item>, Vec<&Item>) = impls
+        let (inherent, traits): (Vec<Ref>, Vec<Ref>) = impls
             .iter()
-            .filter_map(|id| k.index.get(id))
-            .filter(|i| matches!(&i.inner, ItemEnum::Impl(im) if im.blanket_impl.is_none()))
-            .partition(|i| matches!(&i.inner, ItemEnum::Impl(im) if im.trait_.is_none()));
+            .filter_map(at)
+            .filter(|i| matches!(&i.item().inner, ItemEnum::Impl(im) if im.blanket_impl.is_none()))
+            .partition(|i| matches!(&i.item().inner, ItemEnum::Impl(im) if im.trait_.is_none()));
         let traits = if trait_impls { traits } else { Vec::new() };
         for imp in inherent.into_iter().chain(traits) {
-            if let ItemEnum::Impl(im) = &imp.inner {
+            if let ItemEnum::Impl(im) = &imp.item().inner {
                 out.extend(named(&im.items));
             }
         }
@@ -312,8 +305,8 @@ impl Store {
             _ => return Vec::new(),
         };
         let mut out = Vec::new();
-        for id in impls {
-            let Some(ItemEnum::Impl(im)) = r.doc.krate.index.get(&id).map(|i| &i.inner) else {
+        for imp in impls.iter().filter_map(|id| Ref::new(&r.doc, *id)) {
+            let ItemEnum::Impl(im) = &imp.item().inner else {
                 continue;
             };
             let Some(trait_) = &im.trait_ else {
@@ -357,10 +350,9 @@ impl Store {
             })?
         };
         let doc = self.load(&root)?;
-        let mut current = vec![Ref {
-            id: doc.krate.root,
-            doc,
-        }];
+        let root_ref = Ref::new(&doc, doc.file.root())
+            .ok_or_else(|| anyhow!("docs for `{first}` have no root module"))?;
+        let mut current = vec![root_ref];
         let mut walked = vec![first.to_string()];
         for (i, seg) in rest.iter().enumerate() {
             let last = i + 1 == rest.len();
@@ -450,18 +442,91 @@ impl Store {
         names
     }
 
-    /// Walks the public API of `krate` breadth first, so each item is reported at its shortest
-    /// public path, and returns the items whose name matches `query`.
+    /// Public items under `krate` whose name matches `query`, best match first.
     pub fn search(&mut self, krate: &str, query: &str, limit: usize) -> Result<Vec<Hit>> {
         let (roots, root_path) = self.resolve(krate)?;
-        let mut hits: Vec<(u8, Hit)> = Vec::new();
+        let index = self.search_index(roots, &root_path)?;
+        let mut scored: Vec<(u8, &IndexEntry)> = index
+            .entries
+            .iter()
+            .filter_map(|e| Some((score(&e.name, query)? + u8::from(e.member), e)))
+            .collect();
+        scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.path.len().cmp(&b.1.path.len())));
+        let mut hits = Vec::new();
+        for (_, e) in scored {
+            if hits.len() == limit {
+                break;
+            }
+            let doc = self.load(&e.pkg)?;
+            if let Some(target) = Ref::new(&doc, Id(e.id)) {
+                hits.push(Hit {
+                    path: e.path.clone(),
+                    target,
+                });
+            }
+        }
+        Ok(hits)
+    }
+
+    /// Every public item under `root_path`, from memory, from disk, or by walking the docs.
+    fn search_index(&mut self, roots: Vec<Ref>, root_path: &str) -> Result<Arc<SearchIndex>> {
+        if let Some(index) = self.indexes.get(root_path) {
+            return Ok(index.clone());
+        }
+        self.ws()?;
+        let ws = &self.ws.as_ref().expect("loaded by ws()");
+        let saved_at = self.builder.cache_dir().join("search").join(format!(
+            "{:016x}.json",
+            fnv1a(&format!("{}\n{root_path}", ws.root.display()))
+        ));
+        let saved = std::fs::read(&saved_at)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<SearchIndex>(&b).ok())
+            .filter(|index| {
+                // Valid while every crate it was built from still resolves to the same cache
+                // file; a lockfile or feature change moves at least one of them.
+                index
+                    .docs
+                    .iter()
+                    .all(|(pkg, path)| ws.has(pkg) && self.builder.doc_path(ws, pkg) == *path)
+            });
+        let index = Arc::new(match saved {
+            Some(index) => index,
+            None => {
+                let index = self.walk(roots, root_path)?;
+                if std::fs::create_dir_all(saved_at.parent().expect("has a parent")).is_ok()
+                    && let Ok(bytes) = serde_json::to_vec(&index)
+                {
+                    let tmp = saved_at.with_extension(format!("{}.tmp", std::process::id()));
+                    if std::fs::write(&tmp, bytes).is_ok() {
+                        let _ = std::fs::rename(&tmp, &saved_at);
+                    }
+                }
+                index
+            }
+        });
+        self.indexes.insert(root_path.to_string(), index.clone());
+        Ok(index)
+    }
+
+    /// Walks the public API breadth first, so each item is recorded at its shortest public
+    /// path, along with the inherent associated items of every type and trait it reaches.
+    fn walk(&mut self, roots: Vec<Ref>, root_path: &str) -> Result<SearchIndex> {
+        let mut entries = Vec::new();
         let mut seen: HashSet<(PackageId, Id)> = HashSet::new();
-        let mut prefetched: HashSet<PackageId> = HashSet::new();
-        let mut queue: VecDeque<(Ref, String)> =
-            roots.into_iter().map(|r| (r, root_path.clone())).collect();
+        let mut docs: HashMap<PackageId, PathBuf> = HashMap::new();
+        let mut queue: VecDeque<(Ref, String)> = roots
+            .into_iter()
+            .map(|r| (r, root_path.to_string()))
+            .collect();
         while let Some((module, prefix)) = queue.pop_front() {
-            if prefetched.insert(module.doc.pkg.clone()) {
+            if !docs.contains_key(&module.doc.pkg) {
                 self.prefetch(&module.doc)?;
+                let ws = &self.ws.as_ref().expect("loaded by prefetch()");
+                docs.insert(
+                    module.doc.pkg.clone(),
+                    self.builder.doc_path(ws, &module.doc.pkg),
+                );
             }
             for (name, target) in self.children(&module) {
                 let Target::Found(r) = target else {
@@ -470,63 +535,57 @@ impl Store {
                 if !seen.insert(r.key()) {
                     continue;
                 }
-                let path = format!("{prefix}::{name}");
-                if let Some(score) = score(&name, query) {
-                    hits.push((
-                        score,
-                        Hit {
-                            path: path.clone(),
-                            target: r.clone(),
-                        },
-                    ));
+                if !docs.contains_key(&r.doc.pkg) {
+                    self.ws()?;
+                    let ws = &self.ws.as_ref().expect("loaded by ws()");
+                    docs.insert(r.doc.pkg.clone(), self.builder.doc_path(ws, &r.doc.pkg));
                 }
-                match &r.item().inner {
-                    ItemEnum::Module(_) => queue.push_back((r, path)),
+                let path = format!("{prefix}::{name}");
+                if matches!(
+                    r.item().inner,
                     ItemEnum::Struct(_)
-                    | ItemEnum::Enum(_)
-                    | ItemEnum::Union(_)
-                    | ItemEnum::Trait(_) => {
-                        for (member, m) in self.members(&r, false) {
-                            if let Some(score) = score(&member, query)
-                                && seen.insert(m.key())
-                            {
-                                hits.push((
-                                    score + 1,
-                                    Hit {
-                                        path: format!("{path}::{member}"),
-                                        target: m,
-                                    },
-                                ));
-                            }
+                        | ItemEnum::Enum(_)
+                        | ItemEnum::Union(_)
+                        | ItemEnum::Trait(_)
+                ) {
+                    for (member, m) in self.members(&r, false) {
+                        if seen.insert(m.key()) {
+                            entries.push(IndexEntry {
+                                path: format!("{path}::{member}"),
+                                name: member,
+                                pkg: m.doc.pkg.clone(),
+                                id: m.id.0,
+                                member: true,
+                            });
                         }
                     }
-                    _ => {}
+                }
+                entries.push(IndexEntry {
+                    name,
+                    path: path.clone(),
+                    pkg: r.doc.pkg.clone(),
+                    id: r.id.0,
+                    member: false,
+                });
+                if matches!(r.item().inner, ItemEnum::Module(_)) {
+                    queue.push_back((r, path));
                 }
             }
         }
-        hits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.path.len().cmp(&b.1.path.len())));
-        Ok(hits.into_iter().take(limit).map(|(_, h)| h).collect())
+        Ok(SearchIndex {
+            docs: docs.into_iter().collect(),
+            entries,
+        })
     }
 
     /// Builds, in one cargo run, every crate `doc` re-exports from, so walking a facade crate
     /// such as `bevy` costs a few batched builds instead of one build per subcrate.
     fn prefetch(&mut self, doc: &Arc<Doc>) -> Result<()> {
-        let names: HashSet<&str> = doc
-            .krate
-            .index
-            .values()
-            .filter_map(|i| match &i.inner {
-                ItemEnum::Use(u) => u.id,
-                _ => None,
-            })
-            .filter_map(|id| doc.krate.paths.get(&id))
-            .filter(|s| s.crate_id != 0)
-            .filter_map(|s| doc.krate.external_crates.get(&s.crate_id))
-            .map(|e| e.name.as_str())
-            .collect();
         let ws = self.ws()?;
-        let pkgs: Vec<PackageId> = names
-            .into_iter()
+        let pkgs: Vec<PackageId> = doc
+            .file
+            .reexported_crates()
+            .iter()
             .filter_map(|n| ws.find_from(&doc.pkg, n))
             .collect();
         self.ensure(&pkgs)
@@ -571,12 +630,6 @@ fn edit_distance(a: &str, b: &str) -> usize {
         }
     }
     row[b.len()]
-}
-
-fn lock_mtime(root: &Path) -> Option<SystemTime> {
-    std::fs::metadata(root.join("Cargo.lock"))
-        .and_then(|m| m.modified())
-        .ok()
 }
 
 #[cfg(test)]

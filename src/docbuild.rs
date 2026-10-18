@@ -7,6 +7,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use cargo_metadata::PackageId;
 
+use rustdoc_types::{Crate, FORMAT_VERSION};
+
+use crate::cachefile;
 use crate::workspace::Workspace;
 
 /// The nightly whose rustdoc emits `rustdoc_types::FORMAT_VERSION`. Rustdoc JSON is nightly-only
@@ -77,22 +80,35 @@ impl Builder {
         })
     }
 
-    /// Where the JSON for `id` lives once built. Keyed on everything that changes the output:
-    /// source (registry, git commit), version, enabled features and toolchain.
-    pub fn json_path(&self, ws: &Workspace, id: &PackageId) -> PathBuf {
+    pub fn cache_dir(&self) -> &Path {
+        &self.cache
+    }
+
+    /// Where the docs for `id` live once built. Keyed on everything that changes the output:
+    /// source (registry, git commit), version, enabled features, toolchain and cache format.
+    pub fn doc_path(&self, ws: &Workspace, id: &PackageId) -> PathBuf {
         let p = ws.package(id);
         let source = p
             .source
             .as_ref()
             .map_or_else(|| p.manifest_path.as_str().to_string(), |s| s.repr.clone());
-        let key = fnv1a(&[&source, &ws.features(id).join(","), TOOLCHAIN, RUSTDOCFLAGS].join("\n"));
+        let key = fnv1a(
+            &[
+                &source,
+                &ws.features(id).join(","),
+                TOOLCHAIN,
+                RUSTDOCFLAGS,
+                &cachefile::VERSION.to_string(),
+            ]
+            .join("\n"),
+        );
         self.cache
-            .join("json")
-            .join(format!("{}-{}-{key:016x}.json", p.name, p.version))
+            .join("docs")
+            .join(format!("{}-{}-{key:016x}.ldoc", p.name, p.version))
     }
 
     fn is_fresh(&self, ws: &Workspace, id: &PackageId) -> bool {
-        let path = self.json_path(ws, id);
+        let path = self.doc_path(ws, id);
         if ws.package(id).source.is_none() {
             return self.built_path_deps.contains(&path);
         }
@@ -186,9 +202,9 @@ impl Builder {
         let doc_dir = self.target_dir(ws).join("doc");
         for id in batch {
             let lib = ws.lib_name(id).expect("batched packages have a library");
-            let dest = self.json_path(ws, id);
+            let dest = self.doc_path(ws, id);
             std::fs::create_dir_all(dest.parent().expect("cache path has a parent"))?;
-            copy(&doc_dir.join(format!("{lib}.json")), &dest)?;
+            convert(&doc_dir.join(format!("{lib}.json")), &dest)?;
             if ws.package(id).source.is_none() {
                 self.built_path_deps.insert(dest);
             }
@@ -229,18 +245,21 @@ fn list(specs: &[String]) -> String {
     }
 }
 
-fn copy(from: &Path, to: &Path) -> Result<()> {
-    // Copy then rename, so a reader never sees a half-written file. The pid keeps two lockdoc
-    // processes on one project from sharing a temporary file.
-    let tmp = to.with_extension(format!("json.{}.tmp", std::process::id()));
-    std::fs::copy(from, &tmp).with_context(|| format!("copying {}", from.display()))?;
-    std::fs::rename(&tmp, to)?;
-    Ok(())
+/// Parses rustdoc's JSON once and stores it in the cache format.
+fn convert(json: &Path, to: &Path) -> Result<()> {
+    let bytes = std::fs::read(json).with_context(|| format!("reading {}", json.display()))?;
+    let krate: Crate = serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "{} is not rustdoc JSON format {FORMAT_VERSION}; is {TOOLCHAIN} the toolchain rustdoc-types expects?",
+            json.display()
+        )
+    })?;
+    cachefile::write(&krate, to)
 }
 
 /// FNV-1a, for cache keys that must stay the same across Rust releases (`DefaultHasher` does not
 /// promise that).
-fn fnv1a(s: &str) -> u64 {
+pub fn fnv1a(s: &str) -> u64 {
     s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
         (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
     })

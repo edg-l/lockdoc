@@ -97,9 +97,12 @@ lockdoc -C ~/dev/my-game deps
 
 The first lookup in a crate builds its docs. A small crate takes seconds. A facade such as
 `bevy` re-exports around 60 crates, and the first lookup through it took 60 to 170 seconds on
-a Ryzen 5 5600, depending on whether the dependencies were already compiled. After that,
-lookups take a second or two. Built docs are cached across sessions per crate version,
-feature set and toolchain.
+a Ryzen 5 5600, depending on whether the dependencies were already compiled.
+
+After that, everything comes from a cache on disk that new sessions reuse. On the same
+machine, with bevy's docs built, a lookup through `bevy::prelude` takes 45 ms from the shell
+and under 10 ms from a running server, and a search across all of bevy takes 2 to 12 ms. The
+server held 121 MB after those calls.
 
 | Not covered | Why |
 |---|---|
