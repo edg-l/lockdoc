@@ -108,7 +108,11 @@ pub fn signature(item: &Item) -> String {
             render::where_clause(&t.generics)
         ),
         ItemEnum::Constant { type_, const_ } => {
-            format!("const {name}: {} = {};", render::ty(type_), const_.expr)
+            format!(
+                "const {name}: {}{};",
+                render::ty(type_),
+                const_value(Some(&const_.expr))
+            )
         }
         ItemEnum::Static(s) => format!(
             "static {}{name}: {};",
@@ -120,7 +124,7 @@ pub fn signature(item: &Item) -> String {
         ItemEnum::AssocConst { type_, value, .. } => format!(
             "const {name}: {}{};",
             render::ty(type_),
-            value.as_ref().map_or(String::new(), |v| format!(" = {v}"))
+            const_value(value.as_deref())
         ),
         ItemEnum::AssocType {
             generics,
@@ -152,6 +156,15 @@ pub fn signature(item: &Item) -> String {
         ItemEnum::Module(_) => format!("mod {name}"),
         ItemEnum::Primitive(_) => format!("primitive {name}"),
         _ => format!("{} {name}", kind(item)),
+    }
+}
+
+/// ` = <expr>`, or nothing when rustdoc did not render the expression: it writes `_` for any
+/// value that is not a literal.
+fn const_value(expr: Option<&str>) -> String {
+    match expr {
+        None | Some("_") => String::new(),
+        Some(e) => format!(" = {e}"),
     }
 }
 

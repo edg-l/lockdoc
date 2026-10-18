@@ -83,7 +83,9 @@ Results are ordered by match quality, then by path length:
 3. name starts with the query;
 4. name contains the query.
 
-An associated item ranks one step below an item with the same quality of match.
+An associated item ranks just below a module-level item with the same quality of match, and
+above any item with a worse match, so `despawn` lists the `despawn` methods before the
+`Despawn` struct.
 
 Each result is three lines: kind and path, the one-line signature, and the first sentence of
 the docs.

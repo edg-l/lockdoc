@@ -600,6 +600,9 @@ fn is_hidden(item: &Item) -> bool {
         .any(|a| matches!(a, Attribute::Other(s) if s.contains("doc(hidden)")))
 }
 
+/// Match quality, lower is better. Levels are two apart so the one-step penalty search adds
+/// for associated items stays inside a level: `World::despawn` matching `despawn` exactly
+/// still beats the struct `Despawn`, which matches only without case.
 fn score(name: &str, query: &str) -> Option<u8> {
     let l = name.to_lowercase();
     let needle = query.to_lowercase();
@@ -607,11 +610,11 @@ fn score(name: &str, query: &str) -> Option<u8> {
     if name == query {
         Some(0)
     } else if l == needle {
-        Some(1)
-    } else if l.starts_with(needle) {
         Some(2)
-    } else if l.contains(needle) {
+    } else if l.starts_with(needle) {
         Some(4)
+    } else if l.contains(needle) {
+        Some(6)
     } else {
         None
     }
@@ -639,9 +642,12 @@ mod tests {
     #[test]
     fn score_ranks_exact_then_prefix_then_substring() {
         assert_eq!(score("Commands", "Commands"), Some(0));
-        assert_eq!(score("commands", "Commands"), Some(1));
-        assert_eq!(score("CommandsExt", "commands"), Some(2));
-        assert_eq!(score("EntityCommands", "commands"), Some(4));
+        assert_eq!(score("commands", "Commands"), Some(2));
+        assert_eq!(score("CommandsExt", "commands"), Some(4));
+        assert_eq!(score("EntityCommands", "commands"), Some(6));
+        // An exact-case associated item, after search's one-step member penalty, still ranks
+        // above a case-insensitive item.
+        assert!(score("despawn", "despawn").unwrap() + 1 < score("Despawn", "despawn").unwrap());
         assert_eq!(score("World", "commands"), None);
     }
 

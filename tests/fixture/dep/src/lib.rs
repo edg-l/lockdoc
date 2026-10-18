@@ -56,6 +56,9 @@ pub mod geometry {
     }
 }
 
+/// Largest radius the shapes accept.
+pub const MAX_RADIUS: f32 = f32::MAX / 2.0;
+
 #[cfg(feature = "extra")]
 pub mod extra {
     /// Only present with the `extra` feature.

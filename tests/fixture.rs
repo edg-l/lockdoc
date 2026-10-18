@@ -151,3 +151,18 @@ fn manifest_edit_invalidates_saved_metadata() {
     .unwrap();
     assert!(!run(&["deps"]).contains("[extra]"));
 }
+
+#[test]
+fn exact_case_member_outranks_case_insensitive_item() {
+    let out = ok(&["search", "shapes", "area"]);
+    let method = out.find("fn shapes::Circle::area").expect(&out);
+    let trait_ = out.find("trait shapes::geometry::Area").expect(&out);
+    assert!(method < trait_, "{out}");
+}
+
+#[test]
+fn unrendered_const_value_is_left_out() {
+    let out = ok(&["item", "shapes::MAX_RADIUS"]);
+    assert!(out.contains("const MAX_RADIUS: f32"), "{out}");
+    assert!(!out.contains("= _"), "{out}");
+}
