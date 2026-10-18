@@ -56,7 +56,7 @@ nightly is pinned so its output format matches the parser lockdoc is built with.
 
 ```sh
 rustup toolchain install nightly-2026-10-07
-cargo install --git https://github.com/edg-l/lockdoc
+cargo install lockdoc
 ```
 
 Then register it with your agent. For Claude Code, across all projects:
