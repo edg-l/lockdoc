@@ -60,13 +60,13 @@ Everything a session computes is kept here, so a new session starts warm.
 
 ### Doc files
 
-rustdoc's JSON for a large crate is tens of megabytes, and bevy's prelude reaches about 60
-crates. Parsing all of them took 1.3 seconds and held about 1 GB, for a lookup that reads a
-few dozen items. So each crate's JSON is parsed once, when it is built, and stored as a
-`.ldoc` file: one JSON blob per item, behind four sorted tables (id to item, id to path
-summary, defining path to id, name to ids). lockdoc memory-maps the file and binary-searches
-the tables in place. Opening a crate parses nothing, and only the items a query touches are
-deserialized. `cachefile.rs` documents the layout.
+rustdoc's JSON for a large crate is tens of megabytes, and a lookup through bevy's prelude
+reaches about 60 crates while reading a few dozen items. Parsing those 60 files whole costs
+about 1.3 seconds and 1 GB of memory. lockdoc parses each crate's JSON once, when it is
+built, and stores it as a `.ldoc` file: one JSON blob per item, behind four sorted tables (id
+to item, id to path summary, defining path to id, name to ids). lockdoc memory-maps the file
+and binary-searches the tables in place. Opening a crate parses nothing, and only the items a
+query touches are deserialized. `cachefile.rs` documents the layout.
 
 `<key>` hashes everything that changes the output: the package source (registry, or git
 commit), the enabled features, the toolchain, the rustdoc flags and the `.ldoc` format
