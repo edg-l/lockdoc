@@ -9,7 +9,7 @@ which is what lockdoc reads.
 lockdoc builds that JSON locally, inside your workspace's dependency resolution:
 
 ```sh
-cargo +nightly-2026-10-07 doc --frozen --no-deps -p tokio@1.53.3 -p serde@1.0.229 …
+cargo +nightly-2026-10-07 doc --locked --no-deps -p tokio@1.53.3 -p serde@1.0.229 …
 # with CARGO_TARGET_DIR=~/.cache/lockdoc/target/<workspace hash>
 #  and RUSTDOCFLAGS="-Zunstable-options --output-format json --document-hidden-items"
 ```
@@ -21,7 +21,7 @@ you use is there and one behind a feature you don't use is not.
 docs.rs also serves rustdoc JSON, and lockdoc does not use it. docs.rs builds each crate with
 its default features rather than yours. Its builds also span many format versions, while one
 parser reads one format, and versions published before docs.rs started producing JSON have
-none. A local build gives one format, your features and no network.
+none. A local build gives one format and your features.
 
 ### Features of workspace members
 

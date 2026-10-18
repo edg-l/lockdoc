@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::OnceLock;
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result, bail};
@@ -44,21 +46,46 @@ fn stamps(meta: &Metadata) -> Vec<(PathBuf, u128)> {
         .collect()
 }
 
+/// The triple of the machine lockdoc runs on, from `rustc -vV`.
+fn host_triple() -> Result<&'static str> {
+    static HOST: OnceLock<String> = OnceLock::new();
+    if let Some(host) = HOST.get() {
+        return Ok(host);
+    }
+    let out = Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .context("running rustc -vV")?;
+    let host = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("host: "))
+        .context("rustc -vV printed no host triple")?
+        .to_string();
+    Ok(HOST.get_or_init(|| host))
+}
+
 fn metadata(dir: &Path, cache: &Path) -> Result<SavedMetadata> {
+    // The `v2` names the cargo options below; output saved with other options is not reused.
     let saved_at = cache
         .join("metadata")
-        .join(format!("{:016x}.json", fnv1a(&dir.to_string_lossy())));
+        .join(format!("{:016x}-v2.json", fnv1a(&dir.to_string_lossy())));
     if let Ok(bytes) = std::fs::read(&saved_at)
         && let Ok(saved) = serde_json::from_slice::<SavedMetadata>(&bytes)
         && saved.stamps.iter().all(|(f, t)| mtime_ns(f) == *t)
     {
         return Ok(saved);
     }
-    // `--frozen` keeps cargo from rewriting Cargo.lock or touching the network; a lockfile
-    // that is out of date becomes an error the caller sees instead of a silent update.
+    // `--locked` keeps cargo from rewriting Cargo.lock: a lockfile that is out of date becomes
+    // an error the caller sees instead of a silent update. Without `--filter-platform`, cargo
+    // resolves every target platform and needs the sources of crates only another platform
+    // uses, which a machine that never built for it does not have.
     let meta = MetadataCommand::new()
         .current_dir(dir)
-        .other_options(vec!["--frozen".to_string()])
+        .other_options(vec![
+            "--locked".to_string(),
+            "--filter-platform".to_string(),
+            host_triple()?.to_string(),
+        ])
         .exec()
         .with_context(|| format!("cargo metadata failed in {}", dir.display()))?;
     let saved = SavedMetadata {

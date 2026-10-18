@@ -480,7 +480,7 @@ dependencies = [
 
 [[package]]
 name = "lockdoc"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "cargo_metadata",

@@ -57,7 +57,7 @@ Errors:
 | First segment is not a dependency | `` `x` is not a dependency of this workspace; the `deps` tool lists them `` |
 | A later segment does not exist | `` `Seg` not found in `crate::path`; similar names there: … `` |
 | Path starts with `std`, `core` or `alloc` | `lockdoc covers the project's dependencies, not the standard library` |
-| `Cargo.lock` is out of date | cargo's `--frozen` error |
+| `Cargo.lock` is out of date | cargo's `--locked` error |
 | Pinned nightly missing | `toolchain nightly-… is not installed; run rustup toolchain install nightly-…` |
 
 ## `search`

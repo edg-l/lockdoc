@@ -265,6 +265,7 @@ impl Session<'_> {
             ids.iter()
                 .filter_map(|id| {
                     let m = at(id)?;
+                    (!is_hidden(m.item())).then_some(())?;
                     Some((m.item().name.clone()?, m))
                 })
                 .collect()
@@ -429,7 +430,9 @@ impl Session<'_> {
             if next.is_empty() {
                 let near = self.near_names(&current, seg);
                 bail!(
-                    "`{seg}` not found in `{}`{}",
+                    "`{seg}` not found in `{}`{}. Items behind a cargo feature this workspace \
+                     does not enable are absent; `deps` lists the enabled features, and \
+                     `search` finds a name when its path is unknown.",
                     walked.join("::"),
                     if near.is_empty() {
                         String::new()

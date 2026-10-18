@@ -2,7 +2,9 @@
 
 use std::fmt::Write as _;
 
-use rustdoc_types::{Attribute, Item, ItemEnum, MacroKind, StructKind, Type, VariantKind};
+use rustdoc_types::{
+    Attribute, Item, ItemEnum, MacroKind, StructKind, Type, VariantKind, Visibility,
+};
 
 use crate::render;
 use crate::store::{Ref, Session, Target};
@@ -294,7 +296,8 @@ fn declaration(r: &Ref) -> String {
         }
         ItemEnum::Macro(src) => src.clone(),
         ItemEnum::ProcMacro(_) => signature(item),
-        _ => format!("pub {}", signature(item)),
+        _ if item.visibility == Visibility::Public => format!("pub {}", signature(item)),
+        _ => signature(item),
     }
 }
 

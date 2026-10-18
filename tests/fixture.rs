@@ -64,7 +64,7 @@ fn hidden_glob_reexport_is_followed() {
 #[test]
 fn provided_trait_method_resolves_through_type() {
     let out = ok(&["item", "shapes::Circle::double"]);
-    assert!(out.contains("pub fn double(&self) -> f32"), "{out}");
+    assert!(out.contains("\nfn double(&self) -> f32"), "{out}");
     assert!(out.contains("Twice the area."), "{out}");
 }
 

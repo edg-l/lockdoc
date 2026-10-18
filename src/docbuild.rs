@@ -26,7 +26,7 @@ const RUSTDOCFLAGS: &str = "-Zunstable-options --output-format json --document-h
 /// Builds rustdoc JSON for dependencies and caches it under the user cache directory.
 ///
 /// Every cargo run uses a target directory owned by lockdoc, so the project's `target/` and its
-/// build lock are never touched, and `--frozen` so `Cargo.lock` is never rewritten.
+/// build lock are never touched, and `--locked` so `Cargo.lock` is never rewritten.
 ///
 /// Shared by concurrent queries. Only `build_lock` is held while cargo runs, so a query whose
 /// docs are already cached never waits behind a build.
@@ -184,7 +184,7 @@ impl Builder {
     fn run(&self, ws: &Workspace, batch: &[PackageId]) -> Result<()> {
         let mut cmd = Command::new("cargo");
         cmd.arg(format!("+{TOOLCHAIN}"))
-            .args(["doc", "--frozen", "--no-deps", "--quiet"])
+            .args(["doc", "--locked", "--no-deps", "--quiet"])
             .current_dir(&ws.root)
             .env("CARGO_TARGET_DIR", self.target_dir(ws))
             .env("RUSTDOCFLAGS", RUSTDOCFLAGS)

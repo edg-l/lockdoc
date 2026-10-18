@@ -17,7 +17,7 @@ const INSTRUCTIONS: &str = "API docs for this Rust project's dependencies, at th
 and features in its Cargo.lock. Check a signature here instead of recalling it from memory. \
 The first lookup in a crate builds its docs (seconds; a minute or more for a large facade such \
 as bevy) and the result says what was built. Builds use lockdoc's own target directory under \
-the user cache and `--frozen`, so they never touch the project's target/, its build lock or \
+the user cache and `--locked`, so they never touch the project's target/, its build lock or \
 Cargo.lock, and running cargo in the project meanwhile is fine.";
 
 #[derive(Clone)]

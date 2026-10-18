@@ -91,8 +91,9 @@ lockdoc -C ~/dev/my-game deps
 - Builds go to lockdoc's own target directory under `~/.cache/lockdoc`. Your `target/` and
   cargo's build lock on it are never touched, so `cargo build` in the project never waits on
   lockdoc.
-- Every cargo command runs with `--frozen`. lockdoc cannot rewrite `Cargo.lock` or reach the
-  network; an out-of-date lockfile is reported as an error.
+- Every cargo command runs with `--locked`, so lockdoc cannot rewrite `Cargo.lock`; an
+  out-of-date lockfile is reported as an error. Cargo may download a locked crate's source
+  into `~/.cargo` when this machine does not have it yet, as `cargo build` would.
 - The toolchain is selected with `+nightly-…`, so a `rust-toolchain.toml` in the project does
   not change it.
 - A lookup that had to build says so, with the crates and the time taken, so the agent knows
