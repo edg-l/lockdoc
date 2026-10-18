@@ -7,7 +7,7 @@ description = "MCP server that gives coding agents the API docs of a Rust projec
 license = "Apache-2.0"
 repository = "https://github.com/edg-l/lockdoc"
 keywords = ["mcp", "rustdoc", "documentation", "llm", "cargo"]
-categories = ["development-tools::cargo", "development-tools", "command-line-utilities"]
+categories = ["development-tools", "command-line-utilities"]
 readme = "README.md"
 exclude = ["tests/fixture/target"]
 
