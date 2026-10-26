@@ -73,7 +73,7 @@ the project directory, so nothing else is needed; every tool also takes a `proje
 | Tool | What it returns |
 |---|---|
 | `item` | One item by path: declaration, docs, and its methods, fields, variants, trait impls or module contents. `Type::method` shows a single associated item. |
-| `search` | Public items under a crate or module whose name matches, each at its shortest public path with its signature. |
+| `search` | Public items under a crate or module, or across every direct dependency, whose name matches, each at its shortest public path with its signature. |
 | `deps` | The workspace's direct dependencies with locked versions and enabled features. |
 
 The same queries run from the shell, which is handy for checking what the agent sees:
@@ -81,6 +81,7 @@ The same queries run from the shell, which is handy for checking what the agent 
 ```sh
 lockdoc item serde::Serialize
 lockdoc search bevy Commands --limit 5
+lockdoc search JpegDecoder
 lockdoc -C ~/dev/my-game deps
 ```
 

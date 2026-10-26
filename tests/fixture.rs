@@ -94,6 +94,24 @@ fn search_skips_hidden_items_and_trait_impl_duplicates() {
 }
 
 #[test]
+fn search_without_crate_covers_every_dependency() {
+    let out = ok(&["search", "Circle"]);
+    assert!(out.contains("struct shapes::Circle"), "{out}");
+    let out = ok(&["search", "nothing_has_this_name"]);
+    assert!(out.contains("No public item in any dependency"), "{out}");
+}
+
+#[test]
+fn item_path_is_relative_to_crate() {
+    let out = ok(&["item", "--crate", "shapes", "Circle"]);
+    assert!(out.contains("struct shapes::Circle  ("), "{out}");
+    let out = ok(&["item", "--crate", "fixture-shapes", "geometry::Kind"]);
+    assert!(out.contains("enum fixture-shapes::geometry::Kind"), "{out}");
+    let out = ok(&["item", "--crate", "shapes", "shapes::Circle"]);
+    assert!(out.contains("struct shapes::Circle  ("), "{out}");
+}
+
+#[test]
 fn typo_suggests_near_names() {
     let (success, out) = lockdoc(&["item", "shapes::Circel"]);
     assert!(!success);

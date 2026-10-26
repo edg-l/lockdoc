@@ -43,10 +43,27 @@ pub fn deps(store: &Store) -> Result<String> {
     Ok(out)
 }
 
-pub fn item(store: &Store, path: &str) -> Result<String> {
+/// `path` as `item` resolves it: relative to `krate` when one is given, unless `path` already
+/// starts with that crate.
+fn qualify(krate: Option<&str>, path: &str) -> String {
+    let Some(krate) = krate else {
+        return path.to_string();
+    };
+    let code = |s: &str| s.replace('-', "_");
+    let crate_root = krate.split("::").next().unwrap_or(krate);
+    let path_root = path.split("::").next().unwrap_or(path);
+    if code(path_root) == code(crate_root) {
+        path.to_string()
+    } else {
+        format!("{krate}::{path}")
+    }
+}
+
+pub fn item(store: &Store, krate: Option<&str>, path: &str) -> Result<String> {
+    let path = qualify(krate, path);
     let mut session = store.session();
     let body = (|| {
-        let (refs, public) = session.resolve(path)?;
+        let (refs, public) = session.resolve(&path)?;
         let pages: Vec<String> = refs
             .iter()
             .map(|r| describe::page(&mut session, r, &public))
@@ -56,12 +73,15 @@ pub fn item(store: &Store, path: &str) -> Result<String> {
     with_note(&mut session, body)
 }
 
-pub fn search(store: &Store, krate: &str, query: &str, limit: usize) -> Result<String> {
+pub fn search(store: &Store, krate: Option<&str>, query: &str, limit: usize) -> Result<String> {
     let mut session = store.session();
     let body = (|| {
         let hits = session.search(krate, query, limit)?;
         if hits.is_empty() {
-            return Ok(format!("No public item in `{krate}` matches `{query}`."));
+            return Ok(match krate {
+                Some(k) => format!("No public item in `{k}` matches `{query}`."),
+                None => format!("No public item in any dependency matches `{query}`."),
+            });
         }
         let mut out = String::new();
         for h in hits {

@@ -204,11 +204,9 @@ impl Builder {
         }
         let out = cmd.output().context("running cargo doc")?;
         if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let tail: Vec<&str> = stderr.lines().rev().take(15).collect();
             bail!(
                 "cargo doc failed:\n{}",
-                tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+                excerpt(&String::from_utf8_lossy(&out.stderr))
             );
         }
         Ok(())
@@ -245,6 +243,23 @@ impl Builder {
         self.toolchain_checked.store(true, Ordering::Relaxed);
         Ok(())
     }
+}
+
+/// The part of cargo's stderr that says what went wrong: 15 lines from the first error or panic,
+/// else the last 15. A panic is followed by a long debug dump, so the tail alone loses the cause.
+fn excerpt(stderr: &str) -> String {
+    const LINES: usize = 15;
+    let lines: Vec<&str> = stderr.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("error") || l.contains("panicked at"))
+        .unwrap_or(lines.len().saturating_sub(LINES));
+    let end = lines.len().min(start + LINES);
+    let mut out = lines[start..end].join("\n");
+    if end < lines.len() {
+        out.push_str("\n…");
+    }
+    out
 }
 
 /// Names the first few crates; a facade such as bevy builds dozens at once.

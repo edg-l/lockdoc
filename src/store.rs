@@ -467,16 +467,23 @@ impl Session<'_> {
         names
     }
 
-    /// Public items under `krate` whose name matches `query`, best match first.
-    pub fn search(&mut self, krate: &str, query: &str, limit: usize) -> Result<Vec<Hit>> {
-        let (roots, root_path) = self.resolve(krate)?;
-        let index = self.search_index(roots, &root_path)?;
-        let mut scored: Vec<(u8, &IndexEntry)> = index
-            .entries
+    /// Public items under `krate`, or under every direct dependency when it is `None`, whose
+    /// name matches `query`, best match first.
+    pub fn search(&mut self, krate: Option<&str>, query: &str, limit: usize) -> Result<Vec<Hit>> {
+        let indexes = match krate {
+            Some(k) => vec![self.index_under(k)?],
+            None => self.dep_indexes()?,
+        };
+        let mut scored: Vec<(u8, &IndexEntry)> = indexes
             .iter()
+            .flat_map(|index| &index.entries)
             .filter_map(|e| Some((score(&e.name, query)? + u8::from(e.member), e)))
             .collect();
         scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.path.len().cmp(&b.1.path.len())));
+        // A facade and the crate it re-exports are both direct dependencies in many projects
+        // (`bevy` and `bevy_ecs`); after sorting, the first copy is the shortest path.
+        let mut seen = HashSet::new();
+        scored.retain(|(_, e)| seen.insert((e.pkg.clone(), e.id)));
         let mut hits = Vec::new();
         for (_, e) in scored {
             if hits.len() == limit {
@@ -491,6 +498,30 @@ impl Session<'_> {
             }
         }
         Ok(hits)
+    }
+
+    fn index_under(&mut self, path: &str) -> Result<Arc<SearchIndex>> {
+        let (roots, root_path) = self.resolve(path)?;
+        self.search_index(roots, &root_path)
+    }
+
+    /// The search index of every direct dependency. A crate whose docs fail to build is left
+    /// out, and the build note names it; the call fails only when no crate could be searched.
+    fn dep_indexes(&mut self) -> Result<Vec<Arc<SearchIndex>>> {
+        let mut indexes = Vec::new();
+        let mut first_err = None;
+        for (name, _) in self.ws()?.member_deps() {
+            match self.index_under(&name) {
+                Ok(index) => indexes.push(index),
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        match first_err {
+            Some(e) if indexes.is_empty() => Err(e),
+            _ => Ok(indexes),
+        }
     }
 
     /// Every public item under `root_path`, from memory, from disk, or by walking the docs.
@@ -628,7 +659,15 @@ fn is_hidden(item: &Item) -> bool {
 /// Match quality, lower is better. Levels are two apart so the one-step penalty search adds
 /// for associated items stays inside a level: `World::despawn` matching `despawn` exactly
 /// still beats the struct `Despawn`, which matches only without case.
+/// The best score of `name` against any of the space-separated names in `query`.
 fn score(name: &str, query: &str) -> Option<u8> {
+    query
+        .split_whitespace()
+        .filter_map(|term| score_term(name, term))
+        .min()
+}
+
+fn score_term(name: &str, query: &str) -> Option<u8> {
     let l = name.to_lowercase();
     let needle = query.to_lowercase();
     let needle = needle.as_str();
@@ -674,6 +713,13 @@ mod tests {
         // above a case-insensitive item.
         assert!(score("despawn", "despawn").unwrap() + 1 < score("Despawn", "despawn").unwrap());
         assert_eq!(score("World", "commands"), None);
+    }
+
+    #[test]
+    fn score_takes_best_of_space_separated_names() {
+        assert_eq!(score("World", "commands World"), Some(0));
+        assert_eq!(score("WorldMut", "  commands   world "), Some(4));
+        assert_eq!(score("World", "commands  "), None);
     }
 
     #[test]

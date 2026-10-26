@@ -29,27 +29,38 @@ pub struct Server {
     tool_router: ToolRouter<Self>,
 }
 
+// `deny_unknown_fields` turns a misnamed parameter into an error instead of a silently ignored
+// one, which would otherwise change what the remaining parameters mean.
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DepsArgs {
     /// Directory inside the cargo workspace; defaults to the server's working directory.
     project: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ItemArgs {
     /// Path as written in code: `serde::Serialize`, `bevy::prelude::Transform`,
-    /// `tokio::sync::Mutex::lock`. The first segment is the crate name.
+    /// `tokio::sync::Mutex::lock`. The first segment is the crate name, unless `crate` is given.
     path: String,
+    /// Crate or module `path` is relative to, such as `bevy_ui` with path `UiTransform`. Ignored
+    /// when `path` already starts with that crate.
+    #[serde(rename = "crate")]
+    krate: Option<String>,
     /// Directory inside the cargo workspace; defaults to the server's working directory.
     project: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SearchArgs {
-    /// Crate or module to search under, such as `bevy` or `bevy::ecs`.
+    /// Crate or module to search under, such as `bevy` or `bevy::ecs`. Omitted, every direct
+    /// dependency is searched, which builds the docs of each on first use.
     #[serde(rename = "crate")]
-    krate: String,
-    /// Name or part of a name, case-insensitive. Matches items and their methods.
+    krate: Option<String>,
+    /// Name or part of a name, case-insensitive. Matches items and their methods. Several
+    /// space-separated names match any of them.
     query: String,
     /// Maximum results; default 20.
     limit: Option<usize>,
@@ -99,20 +110,22 @@ impl Server {
     }
 
     #[tool(
-        description = "Show one item at the locked version: declaration, docs, and its methods, fields, variants, trait impls or module contents. Follows re-exports, so `bevy::prelude::Transform` works. `Type::method` shows one associated item."
+        description = "Show one item at the locked version: declaration, docs, and its methods, fields, variants, trait impls or module contents. Follows re-exports, so `bevy::prelude::Transform` works. `Type::method` shows one associated item. Give the full path, or `crate` plus a path relative to it."
     )]
     async fn item(&self, Parameters(a): Parameters<ItemArgs>) -> Result<String, String> {
-        self.with_store(a.project, move |s| ops::item(s, &a.path))
-            .await
+        self.with_store(a.project, move |s| {
+            ops::item(s, a.krate.as_deref(), &a.path)
+        })
+        .await
     }
 
     #[tool(
-        description = "Find public items by name under a crate or module, following re-exports, with their shortest public path and signature. Use when the path is unknown."
+        description = "Find public items by name under a crate or module, or across every direct dependency when `crate` is omitted, following re-exports, with their shortest public path and signature. Use when the path is unknown."
     )]
     async fn search(&self, Parameters(a): Parameters<SearchArgs>) -> Result<String, String> {
         let limit = a.limit.unwrap_or(20);
         self.with_store(a.project, move |s| {
-            ops::search(s, &a.krate, &a.query, limit)
+            ops::search(s, a.krate.as_deref(), &a.query, limit)
         })
         .await
     }

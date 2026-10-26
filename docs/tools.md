@@ -1,7 +1,8 @@
 # Tools
 
 Every tool returns plain text. Every tool takes an optional `project`: a directory inside the
-cargo workspace to answer for. Without it, the server's working directory is used.
+cargo workspace to answer for. Without it, the server's working directory is used. A parameter
+a tool does not have is an error naming the ones it does.
 
 When a call had to build documentation, the text starts with a line in brackets naming the
 crates built and the time taken:
@@ -20,6 +21,7 @@ Shows one item.
 | Parameter | Type | Required | Meaning |
 |---|---|---|---|
 | `path` | string | yes | Path as written in code. The first segment is the crate name as used in code (`serde_json`), or the package name (`serde-json`). |
+| `crate` | string | no | Crate or module that `path` is relative to: `crate` `bevy_ui` with `path` `UiTransform` reads as `bevy_ui::UiTransform`. A `path` that already starts with that crate is used as is. |
 | `project` | string | no | Workspace directory. |
 
 The path resolves the way a `use` statement does: through `pub use` re-exports, glob
@@ -66,8 +68,8 @@ Finds public items by name.
 
 | Parameter | Type | Required | Meaning |
 |---|---|---|---|
-| `crate` | string | yes | Crate or module to search under: `bevy`, `bevy::ecs`. |
-| `query` | string | yes | Name or part of a name. |
+| `crate` | string | no | Crate or module to search under: `bevy`, `bevy::ecs`. Without it, every direct dependency is searched. |
+| `query` | string | yes | Name or part of a name. Several names separated by spaces match any of them. |
 | `limit` | integer | no | Maximum results. Default 20. |
 | `project` | string | no | Workspace directory. |
 
@@ -75,6 +77,10 @@ The search walks the public API breadth first, following re-exports into other c
 each item is reported once, at its shortest public path. It matches item names and the names
 of inherent associated items (`World::commands`). Items marked `#[doc(hidden)]` are skipped,
 but hidden re-exports are followed.
+
+Without `crate`, the search covers each direct dependency, and an item reachable from several
+of them (through a facade such as `bevy` and from `bevy_ecs` itself) is reported once, at its
+shortest path. A dependency whose docs fail to build is left out and named in the build note.
 
 Results are ordered by match quality, then by path length:
 
@@ -90,8 +96,11 @@ above any item with a worse match, so `despawn` lists the `despawn` methods befo
 Each result is three lines: kind and path, the one-line signature, and the first sentence of
 the docs.
 
+With several names in `query`, an item ranks by its best-matching name.
+
 Searching a facade crate builds every crate it re-exports. For `bevy` that is the whole
-engine; see the cost notes in the README.
+engine, and a search without `crate` builds every direct dependency; see the cost notes in the
+README.
 
 ## `deps`
 
@@ -112,8 +121,8 @@ The binary answers the same queries without an MCP client.
 ```text
 lockdoc [-C <dir>] serve                         # MCP server on stdio; the default
 lockdoc [-C <dir>] deps
-lockdoc [-C <dir>] item <path>
-lockdoc [-C <dir>] search <crate> <query> [--limit N]
+lockdoc [-C <dir>] item <path> [--crate <crate>]
+lockdoc [-C <dir>] search [<crate>] <query> [--limit N]
 ```
 
 `-C` sets the workspace directory, default `.`. Build notes and results print to stdout,

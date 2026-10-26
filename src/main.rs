@@ -33,12 +33,19 @@ enum Cmd {
     /// List direct dependencies with locked versions and features.
     Deps,
     /// Show an item, e.g. `serde::Serialize` or `bevy::prelude::Transform`.
-    Item { path: String },
-    /// Search public items by name under a crate or module.
+    Item {
+        path: String,
+        /// Crate or module the path is relative to.
+        #[arg(long = "crate")]
+        krate: Option<String>,
+    },
+    /// Search public items by name under a crate or module, or every direct dependency.
     Search {
-        #[arg(name = "CRATE")]
-        krate: String,
-        query: String,
+        /// The crate or module to search under, or the query when it is the only argument.
+        #[arg(value_name = "CRATE")]
+        first: String,
+        /// Without it, `CRATE` is the query and every direct dependency is searched.
+        query: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
@@ -57,12 +64,18 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Cmd::Deps => ops::deps(&Store::new(project)?)?,
-        Cmd::Item { path } => ops::item(&Store::new(project)?, &path)?,
+        Cmd::Item { path, krate } => ops::item(&Store::new(project)?, krate.as_deref(), &path)?,
         Cmd::Search {
-            krate,
+            first,
             query,
             limit,
-        } => ops::search(&Store::new(project)?, &krate, &query, limit)?,
+        } => {
+            let (krate, query) = match &query {
+                Some(q) => (Some(first.as_str()), q),
+                None => (None, &first),
+            };
+            ops::search(&Store::new(project)?, krate, query, limit)?
+        }
     };
     print!("{text}");
     Ok(())
